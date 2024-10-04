@@ -62,8 +62,13 @@ def preprocess(
         path_srcfile = os.path.join(path_srcdir, file)
         path_featuresfile = os.path.join(path_featuresdir, binfile)
         if os.path.exists(path_featuresfile + ".npz"):
-            print(path_srcfile, "skip because exist")
-            return
+            try:
+                _ = np.load(path_featuresfile + ".npz", allow_pickle=True)
+                # print(path_srcfile, "skip because exist")
+                return
+            except Exception as e:
+                print(path_srcfile, "exist but load failed")
+                pass
 
         features = {}
 
