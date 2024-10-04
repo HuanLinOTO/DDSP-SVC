@@ -61,6 +61,10 @@ def preprocess(
         binfile = file
         path_srcfile = os.path.join(path_srcdir, file)
         path_featuresfile = os.path.join(path_featuresdir, binfile)
+        if os.path.exists(path_featuresfile + ".npz"):
+            print(path_srcfile, "skip because exist")
+            return
+
         features = {}
 
         # load audio
