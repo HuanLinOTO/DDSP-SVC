@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import numpy as np
 import torch
@@ -312,6 +313,15 @@ def train(
                         "train/lr": current_lr,
                     }
                 )
+
+            # 如果存在 exp/workdir/stop.txt 则停止训练
+            if os.path.exists(os.path.join(args.env.expdir, "stop.txt")):
+                saver.log_info("Stop.txt detected, stop training.")
+                optimizer_save = optimizer if args.train.save_opt else None
+
+                # save latest
+                saver.save_model(model, optimizer_save, postfix=f"{saver.global_step}")
+                sys.exit(0)
 
             # validation
             if saver.global_step % args.train.interval_val == 0:
