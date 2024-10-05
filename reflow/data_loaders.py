@@ -9,6 +9,8 @@ import random
 from tqdm import tqdm
 from torch.utils.data import Dataset
 
+from logger.utils import Timer, load_config
+
 
 def traverse_dir(
     root_dir,
@@ -52,7 +54,10 @@ def traverse_dir(
 
 
 def get_data_loaders(args, whole_audio=False):
-    data_train = AudioDataset(
+    use_big_chunks = args.data.get("use_big_chunks", False)
+    if use_big_chunks:
+        print("Using big chunks version")
+    data_train = (AudioDatasetBigChunkVer if use_big_chunks else AudioDataset)(
         args.data.train_path,
         waveform_sec=args.data.duration,
         hop_size=args.data.block_size,
@@ -333,3 +338,251 @@ class AudioDataset(Dataset):
 
     def __len__(self):
         return len(self.paths)
+
+
+class AudioDatasetBigChunkVer(Dataset):
+    def __init__(
+        self,
+        path_root,
+        waveform_sec,
+        hop_size,
+        sample_rate,
+        load_all_data=True,
+        whole_audio=False,
+        extensions=["wav"],
+        n_spk=1,
+        device="cpu",
+        fp16=False,
+        use_aug=False,
+    ):
+        super().__init__()
+
+        self.waveform_sec = waveform_sec
+        self.sample_rate = sample_rate
+        self.hop_size = hop_size
+        self.path_root = path_root
+        self.chunks_root = os.path.join(path_root, "chunks")
+
+        self.paths = traverse_dir(
+            os.path.join(path_root, "chunks"),
+            extensions=["npz"],
+        )
+
+        self.features_paths = []
+
+        chunk_info = load_config(os.path.join(self.chunks_root, "info.yaml"))
+        self.num_features = chunk_info.num_features
+        self.num_chunks = chunk_info.num_chunks
+        self.last_chunk_length = chunk_info.last_chunk_length
+        self.num_features_per_chunk = chunk_info.num_features_per_chunk
+
+        self.whole_audio = whole_audio
+        self.use_aug = use_aug
+        self.data_buffer = []
+
+        self.device = device
+        self.n_spk = n_spk
+        self.load_all_data = load_all_data
+        self.fp16 = fp16
+
+        if load_all_data:
+            print("Load all the data from :", path_root)
+        else:
+            print("Load the f0, volume data from :", path_root)
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = []
+            print("Appending futures...")
+            for chunk_path in self.paths:
+                futures.append(
+                    executor.submit(
+                        self.load_chunk,
+                        chunk_path,
+                    )
+                )
+            print("Waiting for futures...")
+            for future in tqdm(futures, total=len(futures)):
+                data = future.result()
+                self.data_buffer.extend(data)
+                for d in data:
+                    self.features_paths.append(d["features_path"])
+
+    def __getitem__(self, file_idx):
+        data_buffer = self.data_buffer[file_idx]
+
+        if data_buffer["duration"] < (self.waveform_sec + 0.1):
+            return self.__getitem__((file_idx + 1) % self.num_features)
+
+        # get item
+        return self.get_data(file_idx, data_buffer)
+
+    def load_chunk(
+        self,
+        chunk_path,
+    ):
+        device = self.device
+        n_spk = self.n_spk
+        load_all_data = self.load_all_data
+        fp16 = self.fp16
+
+        """
+        返回的是一个 list，list 中的每个元素是一个 dict，dict 就是 features
+        """
+        result = []
+        chunk = np.load(chunk_path, allow_pickle=True)
+        for features in chunk["data"]:
+            duration = self.format_feature(features["duration"], device=device)
+            f0 = self.format_feature(features["f0"], device=device)
+            volume = self.format_feature(features["volume"], device=device)
+            aug_vol = self.format_feature(features["aug_vol"], device=device)
+            if n_spk is not None and n_spk > 1:
+                spk_id = features["spk_id"]
+            else:
+                spk_id = 1
+
+            spk_id = torch.LongTensor(np.array([spk_id])).to(device)
+
+            data = {
+                "duration": duration,
+                "f0": f0,
+                "volume": volume,
+                "aug_vol": aug_vol,
+                "spk_id": spk_id,
+                "features_path": features["features_path"],
+            }
+
+            if load_all_data:
+                mel = self.format_feature(
+                    features["mel"], device=device, unsqueeze=False
+                )
+                aug_mel = self.format_feature(
+                    features["aug_mel"], device=device, unsqueeze=False
+                )
+                units = self.format_feature(
+                    features["units"], device=device, unsqueeze=False
+                )
+
+                if fp16:
+                    mel = mel.half()
+                    aug_mel = aug_mel.half()
+                    units = units.half()
+
+                data.update(
+                    {
+                        "mel": mel,
+                        "aug_mel": aug_mel,
+                        "units": units,
+                    }
+                )
+            result.append(data)
+        return result
+
+    def load_features_by_features_idx(
+        self,
+        idx,
+    ):
+        # 输入的 idx 是 features 的 idx，而不是 chunk 的 idx
+        chunk_idx = idx // self.num_features_per_chunk
+        chunk_path = os.path.join(self.chunks_root, f"chunk_{chunk_idx}.npz")
+        chunk = np.load(chunk_path, allow_pickle=True)
+        return chunk["data"][idx % self.num_features_per_chunk]
+
+    def remove_npz_suffix(self, name_ext):
+        return os.path.splitext(name_ext)[0]
+
+    def format_feature(
+        self,
+        feature: np.ndarray,
+        device: str = None,
+        unsqueeze: bool = True,
+    ):
+        tmp = torch.from_numpy(feature).float()
+        if device:
+            tmp = tmp.to(device)
+        if unsqueeze:
+            tmp = tmp.unsqueeze(-1)
+        return tmp
+
+    def get_data(self, file_idx, data_buffer):
+        frame_resolution = self.hop_size / self.sample_rate
+        duration = data_buffer["duration"]
+        waveform_sec = duration if self.whole_audio else self.waveform_sec
+
+        # load audio
+        idx_from = (
+            0 if self.whole_audio else random.uniform(0, duration - waveform_sec - 0.1)
+        )
+        start_frame = int(idx_from / frame_resolution)
+        units_frame_len = int(waveform_sec / frame_resolution)
+        aug_flag = random.choice([True, False]) and self.use_aug
+
+        # load mel
+        mel_key = "aug_mel" if aug_flag else "mel"
+        mel = data_buffer.get(mel_key)
+        features = None
+
+        if mel is None:
+            # 我也觉得屎，但是这样解释效率高
+            if not features:
+                features = np.load(
+                    self.features_paths[file_idx],
+                    allow_pickle=True,
+                )
+
+            mel = self.format_feature(features["mel"], unsqueeze=False)
+            mel = mel[start_frame : start_frame + units_frame_len]
+        else:
+            mel = mel[start_frame : start_frame + units_frame_len]
+
+        # load units
+        units = data_buffer.get("units")
+        if units is None:
+            # 我也觉得屎，但是这样解释效率高
+            if not features:
+                features = np.load(
+                    self.features_paths[file_idx],
+                    allow_pickle=True,
+                )
+
+            units = self.format_feature(features["units"], unsqueeze=False)
+
+            units = units[start_frame : start_frame + units_frame_len]
+            # units = torch.from_numpy(units).float()
+        else:
+            units = units[start_frame : start_frame + units_frame_len]
+
+        # load f0
+        f0 = data_buffer.get("f0")
+        aug_shift = 0
+        if aug_flag:
+            # 我也觉得屎，但是这样解释效率高
+            if not features:
+                features = np.load(
+                    self.features_paths[file_idx],
+                    allow_pickle=True,
+                )
+            aug_shift = features["aug_shift"]
+        f0_frames = (
+            2 ** (aug_shift / 12) * f0[start_frame : start_frame + units_frame_len]
+        )
+
+        # load volume
+        vol_key = "aug_vol" if aug_flag else "volume"
+        volume = data_buffer.get(vol_key)
+        volume_frames = volume[start_frame : start_frame + units_frame_len]
+
+        # load spk_id
+        spk_id = data_buffer.get("spk_id")
+
+        aug_shift = self.format_feature(np.array([[aug_shift]]), unsqueeze=False)
+
+        return dict(
+            mel=mel,
+            f0=f0_frames,
+            volume=volume_frames,
+            units=units,
+            spk_id=spk_id,
+            aug_shift=aug_shift,
+        )
+
+    def __len__(self):
+        return self.num_features
