@@ -95,7 +95,15 @@ def convert_tensor_to_numpy(tensor, is_squeeze=True):
     return tensor.numpy()
 
 
-def load_model(expdir, model, optimizer, name="model", postfix="", device="cpu"):
+def load_model(
+    expdir,
+    model,
+    optimizer,
+    name="model",
+    postfix="",
+    device="cpu",
+    pretrain_ckpt=None,
+):
     if postfix == "":
         postfix = "_" + postfix
     path = os.path.join(expdir, name + postfix)
@@ -112,8 +120,14 @@ def load_model(expdir, model, optimizer, name="model", postfix="", device="cpu")
         ckpt = torch.load(path_pt, map_location=torch.device(device))
         global_step = ckpt["global_step"]
         model.load_state_dict(ckpt["model"], strict=False)
-        if ckpt.get("optimizer") != None:
+        if ckpt.get("optimizer") is not None:
             optimizer.load_state_dict(ckpt["optimizer"])
+
+    if pretrain_ckpt is not None:
+        print(" [*] loading pretrain model from", pretrain_ckpt)
+        ckpt = torch.load(pretrain_ckpt, map_location=torch.device(device))
+        model.load_state_dict(ckpt["model"], strict=False)
+
     return global_step, model, optimizer
 
 

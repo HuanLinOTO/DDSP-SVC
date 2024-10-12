@@ -211,6 +211,7 @@ def train(
     vocoder,
     loader_train,
     loader_test,
+    stop_step: int = None,
 ):
     # saver
     saver = Saver(args, initial_global_step=initial_global_step)
@@ -317,6 +318,14 @@ def train(
             # 如果存在 exp/workdir/stop.txt 则停止训练
             if os.path.exists(os.path.join(args.env.expdir, "stop.txt")):
                 saver.log_info("Stop.txt detected, stop training.")
+                optimizer_save = optimizer if args.train.save_opt else None
+
+                # save latest
+                saver.save_model(model, optimizer_save, postfix=f"{saver.global_step}")
+                sys.exit(0)
+
+            if stop_step is not None and saver.global_step >= stop_step:
+                saver.log_info("Stop step reached, stop training.")
                 optimizer_save = optimizer if args.train.save_opt else None
 
                 # save latest
