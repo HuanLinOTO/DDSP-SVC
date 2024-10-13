@@ -126,6 +126,9 @@ def load_model(
     if pretrain_ckpt is not None:
         print(" [*] loading pretrain model from", pretrain_ckpt)
         ckpt = torch.load(pretrain_ckpt, map_location=torch.device(device))
+        if "ddsp_model.unit2ctrl.spk_embed.weight" in ckpt["model"]:
+            print(" [!] remove spk_embed from pretrain model")
+            del ckpt["model"]["ddsp_model.unit2ctrl.spk_embed.weight"]
         model.load_state_dict(ckpt["model"], strict=False)
 
     return global_step, model, optimizer
