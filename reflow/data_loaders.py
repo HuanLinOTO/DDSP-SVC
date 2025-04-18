@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import time
 import numpy as np
 import librosa
 import torch
@@ -9,27 +10,28 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 
 
-def get_npy_shape(file_path):
-    with open(file_path, "rb") as f:
-        version = np.lib.format.read_magic(f)
-        if version == (1, 0):
-            shape = np.lib.format.read_array_header_1_0(f)[0]
-        elif version == (2, 0):
-            shape = np.lib.format.read_array_header_2_0(f)[0]
-        else:
-            raise ValueError("Unsupported .npy file version")
-    return shape
-        
-def traverse_dir(
-        root_dir,
-        extensions,
-        amount=None,
-        str_include=None,
-        str_exclude=None,
-        is_pure=False,
-        is_sort=False,
-        is_ext=True):
+# def get_npy_shape(file_path):
+#     with open(file_path, "rb") as f:
+#         version = np.lib.format.read_magic(f)
+#         if version == (1, 0):
+#             shape = np.lib.format.read_array_header_1_0(f)[0]
+#         elif version == (2, 0):
+#             shape = np.lib.format.read_array_header_2_0(f)[0]
+#         else:
+#             raise ValueError("Unsupported .npy file version")
+#     return shape
 
+
+def traverse_dir(
+    root_dir,
+    extensions,
+    amount=None,
+    str_include=None,
+    str_exclude=None,
+    is_pure=False,
+    is_sort=False,
+    is_ext=True,
+):
     file_list = []
     cnt = 0
     for root, _, files in os.walk(root_dir):
@@ -37,23 +39,23 @@ def traverse_dir(
             if any([file.endswith(f".{ext}") for ext in extensions]):
                 # path
                 mix_path = os.path.join(root, file)
-                pure_path = mix_path[len(root_dir)+1:] if is_pure else mix_path
+                pure_path = mix_path[len(root_dir) + 1 :] if is_pure else mix_path
 
                 # amount
                 if (amount is not None) and (cnt == amount):
                     if is_sort:
                         file_list.sort()
                     return file_list
-                
+
                 # check string
                 if (str_include is not None) and (str_include not in pure_path):
                     continue
                 if (str_exclude is not None) and (str_exclude in pure_path):
                     continue
-                
+
                 if not is_ext:
-                    ext = pure_path.split('.')[-1]
-                    pure_path = pure_path[:-(len(ext)+1)]
+                    ext = pure_path.split(".")[-1]
+                    pure_path = pure_path[: -(len(ext) + 1)]
                 file_list.append(pure_path)
                 cnt += 1
     if is_sort:
@@ -73,14 +75,17 @@ def get_data_loaders(args, whole_audio=False):
         n_spk=args.model.n_spk,
         device=args.train.cache_device,
         fp16=args.train.cache_fp16,
-        use_aug=True)
+        use_aug=True,
+    )
     loader_train = torch.utils.data.DataLoader(
-        data_train ,
+        data_train,
         batch_size=args.train.batch_size if not whole_audio else 1,
         shuffle=True,
-        num_workers=args.train.num_workers if args.train.cache_device=='cpu' else 0,
-        persistent_workers=(args.train.num_workers > 0) if args.train.cache_device=='cpu' else False,
-        pin_memory=True if args.train.cache_device=='cpu' else False
+        num_workers=args.train.num_workers if args.train.cache_device == "cpu" else 0,
+        persistent_workers=(args.train.num_workers > 0)
+        if args.train.cache_device == "cpu"
+        else False,
+        pin_memory=True if args.train.cache_device == "cpu" else False,
     )
     data_valid = AudioDataset(
         args.data.valid_path,
@@ -90,15 +95,12 @@ def get_data_loaders(args, whole_audio=False):
         load_all_data=args.train.cache_all_data,
         whole_audio=True,
         extensions=args.data.extensions,
-        n_spk=args.model.n_spk)
-    loader_valid = torch.utils.data.DataLoader(
-        data_valid,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True
+        n_spk=args.model.n_spk,
     )
-    return loader_train, loader_valid 
+    loader_valid = torch.utils.data.DataLoader(
+        data_valid, batch_size=1, shuffle=False, num_workers=0, pin_memory=True
+    )
+    return loader_train, loader_valid
 
 
 class AudioDataset(Dataset):
@@ -110,160 +112,104 @@ class AudioDataset(Dataset):
         sample_rate,
         load_all_data=True,
         whole_audio=False,
-        extensions=['wav'],
+        extensions=["wav"],
         n_spk=1,
-        device='cpu',
+        device="cpu",
         fp16=False,
         use_aug=False,
     ):
         super().__init__()
-        
+
         self.sample_rate = sample_rate
         self.hop_size = hop_size
         self.crop_len = int(waveform_sec * sample_rate / hop_size)
         self.path_root = path_root
         self.paths = traverse_dir(
-            os.path.join(path_root, 'audio'),
+            os.path.join(path_root, "audio"),
             extensions=extensions,
             is_pure=True,
             is_sort=True,
-            is_ext=True
+            is_ext=True,
         )
         self.whole_audio = whole_audio
         self.use_aug = use_aug
-        self.data_buffer={}
-        self.pitch_aug_dict = np.load(os.path.join(self.path_root, 'pitch_aug_dict.npy'), allow_pickle=True).item()
-        if load_all_data:
-            print('Load all the data from :', path_root)
-        else:
-            print('Load the f0, volume data from :', path_root)
-        for name_ext in tqdm(self.paths, total=len(self.paths)):
-            name = os.path.splitext(name_ext)[0]
-            
-            path_f0 = os.path.join(self.path_root, 'f0', name_ext) + '.npy'
-            f0 = np.load(path_f0)
-            f0_len = len(f0)
-            f0 = torch.from_numpy(f0).float().unsqueeze(-1).to(device)
-                
-            path_volume = os.path.join(self.path_root, 'volume', name_ext) + '.npy'
-            volume = np.load(path_volume)
-            volume_len = len(volume)
-            volume = torch.from_numpy(volume).float().unsqueeze(-1).to(device)
-            
-            path_augvol = os.path.join(self.path_root, 'aug_vol', name_ext) + '.npy'
-            aug_vol = np.load(path_augvol)
-            aug_vol_len = len(aug_vol)
-            aug_vol = torch.from_numpy(aug_vol).float().unsqueeze(-1).to(device)
-                        
-            if n_spk is not None and n_spk > 1:
-                dirname_split = re.split(r"_|\-", os.path.dirname(name_ext), 2)[0]
-                spk_id = int(dirname_split) if str.isdigit(dirname_split) else 0
-                if spk_id < 1 or spk_id > n_spk:
-                    raise ValueError(' [x] Muiti-speaker traing error : spk_id must be a positive integer from 1 to n_spk ')
-            else:
-                spk_id = 1
-            spk_id = torch.LongTensor(np.array([spk_id])).to(device)
-            
-            path_mel = os.path.join(self.path_root, 'mel', name_ext) + '.npy'
-            path_augmel = os.path.join(self.path_root, 'aug_mel', name_ext) + '.npy'
-            path_units = os.path.join(self.path_root, 'units', name_ext) + '.npy'
-            
-            mel_len = get_npy_shape(path_mel)[0]
-            aug_mel_len = get_npy_shape(path_augmel)[0]
-            units_len = get_npy_shape(path_units)[0]
-            frame_len = min(mel_len, aug_mel_len, units_len, f0_len, volume_len, aug_vol_len)
-            
-            if load_all_data:
-                mel = np.load(path_mel)
-                mel = torch.from_numpy(mel).to(device)
-                
-                aug_mel = np.load(path_augmel)
-                aug_mel = torch.from_numpy(aug_mel).to(device)
-                
-                units = np.load(path_units)
-                units = torch.from_numpy(units).to(device)
-                
-                if fp16:
-                    mel = mel.half()
-                    aug_mel = aug_mel.half()
-                    units = units.half()
-                    
-                self.data_buffer[name_ext] = {
-                        'frame_len': frame_len,
-                        'mel': mel,
-                        'aug_mel': aug_mel,
-                        'units': units,
-                        'f0': f0,
-                        'volume': volume,
-                        'aug_vol': aug_vol,
-                        'spk_id': spk_id
-                        }
-            else:
-                self.data_buffer[name_ext] = {
-                        'frame_len': frame_len,
-                        'f0': f0,
-                        'volume': volume,
-                        'aug_vol': aug_vol,
-                        'spk_id': spk_id
-                        }
-           
+
+        self.device = device
 
     def __getitem__(self, file_idx):
         name_ext = self.paths[file_idx]
-        data_buffer = self.data_buffer[name_ext]
+        # data_buffer = self.data_buffer[name_ext]
         # check duration. if too short, then skip
-        if data_buffer['frame_len'] < self.crop_len:
-            return self.__getitem__( (file_idx + 1) % len(self.paths))
-            
-        # get item
-        return self.get_data(name_ext, data_buffer)
+        # if data_buffer["frame_len"] < self.crop_len:
+        return self.get_data(name_ext)
+        # return _
+        # return self.__getitem__((file_idx + 1) % len(self.paths))
 
-    def get_data(self, name_ext, data_buffer):
-        name = os.path.splitext(name_ext)[0]
-        start_frame = 0 if self.whole_audio else random.randint(0, data_buffer['frame_len'] - self.crop_len)
-        units_frame_len = data_buffer['frame_len'] if self.whole_audio else self.crop_len
+        # get item
+
+    def get_data(self, name_ext):
+        features = np.load(os.path.join(self.path_root, "features", name_ext) + ".npz")
+
         aug_flag = random.choice([True, False]) and self.use_aug
 
-        # load mel
-        mel_key = 'aug_mel' if aug_flag else 'mel'
-        mel = data_buffer.get(mel_key)
-        if mel is None:
-            mel = os.path.join(self.path_root, mel_key, name_ext) + '.npy'
-            mel = np.load(mel)
-            mel = mel[start_frame : start_frame + units_frame_len]
-            mel = torch.from_numpy(mel).float() 
-        else:
-            mel = mel[start_frame : start_frame + units_frame_len]
-            
-        # load units
-        units = data_buffer.get('units')
-        if units is None:
-            units = os.path.join(self.path_root, 'units', name_ext) + '.npy'
-            units = np.load(units)
-            units = units[start_frame : start_frame + units_frame_len]
-            units = torch.from_numpy(units).float() 
-        else:
-            units = units[start_frame : start_frame + units_frame_len]
+        mel_key = "aug_mel" if aug_flag else "mel"
+        mel = features.get(mel_key)
+
+        units = features.get("units")
+
+        f0 = features.get("f0")
+        f0 = torch.from_numpy(f0).float().unsqueeze(-1).to(self.device)
+
+        vol_key = "aug_vol" if aug_flag else "volume"
+        volume = features.get(vol_key)
+        volume = torch.from_numpy(volume).float().unsqueeze(-1).to(self.device)
+
+        frame_len = min(
+            mel.shape[0],
+            units.shape[0],
+            f0.shape[0],
+            volume.shape[0],
+        )
+
+        name = os.path.splitext(name_ext)[0]
+        start_frame = (
+            0 if self.whole_audio else random.randint(0, frame_len - self.crop_len)
+        )
+        units_frame_len = frame_len if self.whole_audio else self.crop_len
+        aug_flag = random.choice([True, False]) and self.use_aug
+
+        mel = mel[start_frame : start_frame + units_frame_len]
+
+        units = units[start_frame : start_frame + units_frame_len]
 
         # load f0
-        f0 = data_buffer.get('f0')
         aug_shift = 0
         if aug_flag:
-            aug_shift = self.pitch_aug_dict[name_ext]
-        f0_frames = 2 ** (aug_shift / 12) * f0[start_frame : start_frame + units_frame_len]
-        
+            aug_shift = features["keyshift"]
+        f0_frames = (
+            2 ** (aug_shift / 12) * f0[start_frame : start_frame + units_frame_len]
+        )
+
         # load volume
-        vol_key = 'aug_vol' if aug_flag else 'volume'
-        volume = data_buffer.get(vol_key)
         volume_frames = volume[start_frame : start_frame + units_frame_len]
-        
-        # load spk_id
-        spk_id = data_buffer.get('spk_id')
-        
+
         # load shift
         aug_shift = torch.from_numpy(np.array([[aug_shift]])).float()
-        
-        return dict(mel=mel, f0=f0_frames, volume=volume_frames, units=units, spk_id=spk_id, aug_shift=aug_shift, name=name, name_ext=name_ext)
+
+        # Get spk_id from first part of name_ext path
+        spk_id = int(name_ext.split(os.path.sep)[0])
+        spk_id = torch.LongTensor(np.array([spk_id])).to(self.device)
+
+        return dict(
+            mel=mel,
+            f0=f0_frames,
+            volume=volume_frames,
+            units=units,
+            spk_id=spk_id,
+            aug_shift=aug_shift,
+            name=name,
+            name_ext=name_ext,
+        )
 
     def __len__(self):
         return len(self.paths)
