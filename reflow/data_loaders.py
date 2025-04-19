@@ -2,6 +2,7 @@ import os
 import random
 import re
 import time
+from typing import Any
 import numpy as np
 import librosa
 import torch
@@ -81,11 +82,15 @@ def get_data_loaders(args, whole_audio=False):
         data_train,
         batch_size=args.train.batch_size if not whole_audio else 1,
         shuffle=True,
-        num_workers=args.train.num_workers if args.train.cache_device == "cpu" else 0,
-        persistent_workers=(args.train.num_workers > 0)
-        if args.train.cache_device == "cpu"
-        else False,
-        pin_memory=True if args.train.cache_device == "cpu" else False,
+        # num_workers=args.train.num_workers if args.train.cache_device == "cpu" else 0,
+        # persistent_workers=(args.train.num_workers > 0)
+        # if args.train.cache_device == "cpu"
+        # else False,
+        # pin_memory=True if args.train.cache_device == "cpu" else False,
+        # prefetch_factor=8,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
     )
     data_valid = AudioDataset(
         args.data.valid_path,
@@ -104,6 +109,8 @@ def get_data_loaders(args, whole_audio=False):
 
 
 class AudioDataset(Dataset):
+    cached = {}
+
     def __init__(
         self,
         path_root,
@@ -138,18 +145,27 @@ class AudioDataset(Dataset):
 
     def __getitem__(self, file_idx):
         name_ext = self.paths[file_idx]
-        # data_buffer = self.data_buffer[name_ext]
-        # check duration. if too short, then skip
-        # if data_buffer["frame_len"] < self.crop_len:
-        return self.get_data(name_ext)
-        # return _
-        # return self.__getitem__((file_idx + 1) % len(self.paths))
+        if name_ext not in self.cached:
+            print("cache not hint")
+            features = torch.load(
+                os.path.join(self.path_root, "features", name_ext) + ".2.pt"
+            )
+            # Get spk_id from first part of name_ext path
+            spk_id = int(name_ext.split(os.path.sep)[0])
+            spk_id = torch.LongTensor(np.array([spk_id])).to(self.device)
+            self.cached[name_ext] = {
+                "frame_len": features.get("frame_len"),
+                "f0": features.get("f0"),
+                "volume": features.get("volume"),
+                "aug_vol": features.get("aug_vol"),
+                "spk_id": spk_id,
+            }
 
-        # get item
-
-    def get_data(self, name_ext):
-        features = np.load(os.path.join(self.path_root, "features", name_ext) + ".npz")
-
+        features = torch.load(
+            os.path.join(self.path_root, "features", name_ext) + ".1.pt",
+            map_location=self.device,
+        )
+        cached_features: dict[str, torch.Tensor | Any] = self.cached[name_ext]
         aug_flag = random.choice([True, False]) and self.use_aug
 
         mel_key = "aug_mel" if aug_flag else "mel"
@@ -157,19 +173,12 @@ class AudioDataset(Dataset):
 
         units = features.get("units")
 
-        f0 = features.get("f0")
-        f0 = torch.from_numpy(f0).float().unsqueeze(-1).to(self.device)
+        f0 = cached_features.get("f0").to(self.device, non_blocking=True)
+
+        frame_len = cached_features.get("frame_len")
 
         vol_key = "aug_vol" if aug_flag else "volume"
-        volume = features.get(vol_key)
-        volume = torch.from_numpy(volume).float().unsqueeze(-1).to(self.device)
-
-        frame_len = min(
-            mel.shape[0],
-            units.shape[0],
-            f0.shape[0],
-            volume.shape[0],
-        )
+        volume = cached_features.get(vol_key).to(self.device, non_blocking=True)
 
         name = os.path.splitext(name_ext)[0]
         start_frame = (
@@ -196,16 +205,12 @@ class AudioDataset(Dataset):
         # load shift
         aug_shift = torch.from_numpy(np.array([[aug_shift]])).float()
 
-        # Get spk_id from first part of name_ext path
-        spk_id = int(name_ext.split(os.path.sep)[0])
-        spk_id = torch.LongTensor(np.array([spk_id])).to(self.device)
-
         return dict(
             mel=mel,
             f0=f0_frames,
             volume=volume_frames,
             units=units,
-            spk_id=spk_id,
+            spk_id=cached_features["spk_id"],
             aug_shift=aug_shift,
             name=name,
             name_ext=name_ext,

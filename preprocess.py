@@ -32,6 +32,10 @@ def parse_args(args=None, namespace=None):
     return parser.parse_args(args=args, namespace=namespace)
 
 
+def np_feature_to_unsqueeze_tensor(x: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(x).float().unsqueeze(-1)
+
+
 def preprocess(
     path,
     f0_extractor,
@@ -56,7 +60,8 @@ def preprocess(
     # pitch augmentation dictionary
     # run
     def process(file):
-        binfile = file + ".npz"
+        binfile1 = file + ".1.pt"
+        binfile2 = file + ".2.pt"
 
         path_srcfile = os.path.join(path_srcdir, file)
 
@@ -102,18 +107,37 @@ def preprocess(
             f0[uv] = np.interp(np.where(uv)[0], np.where(~uv)[0], f0[~uv])
 
             os.makedirs(
-                os.path.dirname(os.path.join(path_bindir, binfile)), exist_ok=True
+                os.path.dirname(os.path.join(path_bindir, binfile1)), exist_ok=True
             )
 
-            np.savez_compressed(
-                os.path.join(path_bindir, binfile),
-                f0=f0,
-                units=units,
-                volume=volume,
-                mel=mel,
-                aug_mel=aug_mel,
-                aug_vol=aug_vol,
-                keyshift=keyshift,
+            f0 = np_feature_to_unsqueeze_tensor(f0)
+            units = torch.from_numpy(units)
+            volume = np_feature_to_unsqueeze_tensor(volume)
+            aug_vol = np_feature_to_unsqueeze_tensor(aug_vol)
+
+            torch.save(
+                dict(
+                    units=units,
+                    mel=mel,
+                    aug_mel=aug_mel,
+                    keyshift=keyshift,
+                ),
+                os.path.join(path_bindir, binfile1),
+            )
+
+            torch.save(
+                dict(
+                    f0=f0,
+                    volume=volume,
+                    aug_vol=aug_vol,
+                    frame_len=min(
+                        mel.shape[0],
+                        units.shape[0],
+                        f0.shape[0],
+                        volume.shape[0],
+                    ),
+                ),
+                os.path.join(path_bindir, binfile2),
             )
 
         else:
