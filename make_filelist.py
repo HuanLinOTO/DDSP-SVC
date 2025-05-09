@@ -1,3 +1,4 @@
+import json
 import os
 import argparse
 import csv
@@ -38,6 +39,7 @@ def parse_args(args=None, namespace=None):
     )
     return parser.parse_args(args=args, namespace=namespace)
 
+
 def process_directory(
     data_path, dir_name, output_dir, extensions=["wav"], chunk_size=2000
 ):
@@ -52,15 +54,18 @@ def process_directory(
     if not os.path.exists(path_srcdir):
         print(f"Audio directory {path_srcdir} does not exist, skipping.")
         return
-    
+
     # Get all subdirectories in audio directory
-    subdirs = [d for d in os.listdir(path_srcdir) 
-               if os.path.isdir(os.path.join(path_srcdir, d))]
+    subdirs = [
+        d
+        for d in os.listdir(path_srcdir)
+        if os.path.isdir(os.path.join(path_srcdir, d))
+    ]
     subdirs.sort()  # Sort to ensure consistent speaker IDs
-    
+
     # Create speaker ID mapping (starting from 1)
-    spk_mapping = {subdir: idx+1 for idx, subdir in enumerate(subdirs)}
-    
+    spk_mapping = {subdir: idx + 1 for idx, subdir in enumerate(subdirs)}
+
     # Collect all files with their speaker IDs
     all_files = []
     for subdir in subdirs:
@@ -68,16 +73,16 @@ def process_directory(
         files = traverse_dir(
             subdir_path, extensions=extensions, is_pure=False, is_sort=True, is_ext=True
         )
-        
+
         # Convert to relative paths and add speaker ID
         rel_files = []
         for file in files:
             rel_path = os.path.relpath(file, path_srcdir)
             spk_id = spk_mapping[subdir]
             rel_files.append((spk_id, rel_path))
-        
+
         all_files.extend(rel_files)
-    
+
     # Split files into chunks
     total_files = len(all_files)
     if total_files == 0:
@@ -86,6 +91,12 @@ def process_directory(
         return
 
     num_chunks = (total_files + chunk_size - 1) // chunk_size  # Ceiling division
+
+    # save spk_mapping spk_map.json
+    spk_map_path = os.path.join(output_dir, f"{dir_name}_spk_map.json")
+    with open(spk_map_path, "w", encoding="utf-8") as f:
+        json.dump(spk_mapping, f, ensure_ascii=False, indent=4)
+    print(f"Saved speaker mapping to {spk_map_path}")
 
     print(f"Found {total_files} files in {dir_name}, creating {num_chunks} chunks...")
     print(f"Assigned {len(subdirs)} speaker IDs based on directory order.")
@@ -98,7 +109,7 @@ def process_directory(
         # Create output file (now as CSV)
         output_file = os.path.join(output_dir, f"{dir_name}_chunk_{i + 1:03d}.csv")
 
-        with open(output_file, "w", encoding="utf-8", newline='') as f:
+        with open(output_file, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             for spk_id, file_path in chunk_files:
                 writer.writerow([spk_id, file_path])
